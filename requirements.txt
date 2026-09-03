@@ -1,0 +1,18 @@
+# Industrial Safety / PPE Detection Project
+# Python: 3.11
+#
+# Install the correct PyTorch build FIRST on each computer:
+#   - CPU PC: standard PyTorch build is fine.
+#   - GPU PC: install the CUDA-enabled PyTorch build matching the GPU/driver.
+#
+# Then install this file with:
+#   python -m pip install -r requirements.txt
+
+ultralytics==8.4.137
+opencv-python==5.0.0.93
+streamlit==1.62.0
+matplotlib==3.11.1
+pandas==3.0.5
+numpy==2.4.6
+pillow==12.3.0
+PyYAML==6.0.3
