@@ -1,26 +1,18 @@
-from pathlib import Path
 from collections import Counter, defaultdict
+from pathlib import Path
 
-from PIL import Image
-import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from PIL import Image
 
-
-# ============================================================
-# CONFIG
-# ============================================================
 
 DATASET_ROOT = Path("data/raw/SH17")
 IMAGES_DIR = DATASET_ROOT / "images"
 LABELS_DIR = DATASET_ROOT / "labels"
-
 TRAIN_FILE = DATASET_ROOT / "train_files.txt"
 VAL_FILE = DATASET_ROOT / "val_files.txt"
-
 OUTPUT_DIR = Path("results/dataset_analysis")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 
 CLASS_NAMES = {
     0: "person",
@@ -41,153 +33,76 @@ CLASS_NAMES = {
     15: "safety-suit",
     16: "safety-vest",
 }
-
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
 def read_split(path):
-    """Return image stems belonging to a split."""
-
-    stems = set()
-
-    for line in path.read_text(encoding="utf-8").splitlines():
-
-        line = line.strip()
-
-        if line:
-            stems.add(
-                Path(line.replace("\\", "/")).stem
-            )
-
-    return stems
+    """Return the image stems listed in a dataset split."""
+    return {
+        Path(line.strip().replace("\\", "/")).stem
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
 
 
 def save_plot(filename):
     plt.tight_layout()
-    plt.savefig(
-        OUTPUT_DIR / filename,
-        dpi=200,
-        bbox_inches="tight"
-    )
+    plt.savefig(OUTPUT_DIR / filename, dpi=200, bbox_inches="tight")
     plt.close()
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
-
     print("=" * 60)
     print("SH17 DATASET INSPECTION")
     print("=" * 60)
 
     train_stems = read_split(TRAIN_FILE)
     val_stems = read_split(VAL_FILE)
-
-    image_files = sorted([
+    image_files = sorted(
         path
         for path in IMAGES_DIR.rglob("*")
         if path.suffix.lower() in IMAGE_EXTENSIONS
-    ])
-
-    label_files = sorted(
-        LABELS_DIR.rglob("*.txt")
     )
-
-    # --------------------------------------------------------
-    # STORAGE
-    # --------------------------------------------------------
+    label_files = sorted(LABELS_DIR.rglob("*.txt"))
 
     class_counts = Counter()
-
     train_counts = Counter()
     val_counts = Counter()
-
     images_per_class = Counter()
-
-    bbox_areas = defaultdict(list)
-
+    bounding_box_areas = defaultdict(list)
     objects_per_image = []
-
     widths = []
     heights = []
-
     corrupt_images = 0
     invalid_annotations = 0
 
-    # ========================================================
-    # IMAGE INSPECTION
-    # ========================================================
-
     print("\nReading images...")
-
     for image_path in image_files:
-
         try:
-
             with Image.open(image_path) as image:
-
                 width, height = image.size
-
                 widths.append(width)
                 heights.append(height)
-
         except Exception:
-
             corrupt_images += 1
 
-    # ========================================================
-    # LABEL INSPECTION
-    # ========================================================
-
     print("Reading labels...")
-
     for label_path in label_files:
-
-        stem = label_path.stem
-
-        lines = (
-            label_path
-            .read_text(encoding="utf-8")
-            .strip()
-            .splitlines()
-        )
-
         object_count = 0
         classes_in_image = set()
-
+        lines = label_path.read_text(encoding="utf-8").strip().splitlines()
         for line in lines:
-
             parts = line.split()
-
             if len(parts) != 5:
                 invalid_annotations += 1
                 continue
-
             try:
-
                 class_id = int(parts[0])
-
-                x = float(parts[1])
-                y = float(parts[2])
-                width = float(parts[3])
-                height = float(parts[4])
-
+                x, y, width, height = map(float, parts[1:])
             except ValueError:
-
                 invalid_annotations += 1
                 continue
-
-            if class_id not in CLASS_NAMES:
-                invalid_annotations += 1
-                continue
-
-            if not (
+            if class_id not in CLASS_NAMES or not (
                 0 <= x <= 1
                 and 0 <= y <= 1
                 and 0 < width <= 1
@@ -198,228 +113,85 @@ def main():
 
             class_counts[class_id] += 1
             classes_in_image.add(class_id)
-
-            bbox_areas[class_id].append(
-                width * height
-            )
-
-            if stem in train_stems:
+            bounding_box_areas[class_id].append(width * height)
+            if label_path.stem in train_stems:
                 train_counts[class_id] += 1
-
-            elif stem in val_stems:
+            elif label_path.stem in val_stems:
                 val_counts[class_id] += 1
-
             object_count += 1
 
         objects_per_image.append(object_count)
-
         for class_id in classes_in_image:
             images_per_class[class_id] += 1
 
-    # ========================================================
-    # CREATE STATISTICS TABLE
-    # ========================================================
-
     rows = []
-
     for class_id, class_name in CLASS_NAMES.items():
-
-        areas = bbox_areas[class_id]
-
-        median_area = (
-            np.median(areas)
-            if areas else 0
+        areas = bounding_box_areas[class_id]
+        rows.append(
+            {
+                "class_id": class_id,
+                "class": class_name,
+                "annotations": class_counts[class_id],
+                "images": images_per_class[class_id],
+                "train_annotations": train_counts[class_id],
+                "val_annotations": val_counts[class_id],
+                "median_bbox_area_percent": (
+                    np.median(areas) * 100 if areas else 0
+                ),
+            }
         )
 
-        rows.append({
-            "class_id": class_id,
-            "class": class_name,
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    statistics = pd.DataFrame(rows)
+    statistics.to_csv(OUTPUT_DIR / "class_statistics.csv", index=False)
 
-            "annotations":
-                class_counts[class_id],
-
-            "images":
-                images_per_class[class_id],
-
-            "train_annotations":
-                train_counts[class_id],
-
-            "val_annotations":
-                val_counts[class_id],
-
-            "median_bbox_area_percent":
-                median_area * 100,
-        })
-
-    df = pd.DataFrame(rows)
-
-    df.to_csv(
-        OUTPUT_DIR / "class_statistics.csv",
-        index=False
-    )
-
-    # ========================================================
-    # 1. CLASS DISTRIBUTION
-    # ========================================================
-
-    plot_df = df.sort_values(
-        "annotations",
-        ascending=True
-    )
+    plot_data = statistics.sort_values("annotations")
+    plt.figure(figsize=(11, 7))
+    plt.barh(plot_data["class"], plot_data["annotations"])
+    plt.title("SH17 Class Distribution")
+    plt.xlabel("Number of annotations")
+    plt.ylabel("")
+    save_plot("class_distribution.png")
 
     plt.figure(figsize=(11, 7))
-
     plt.barh(
-        plot_df["class"],
-        plot_df["annotations"]
+        plot_data["class"],
+        plot_data["train_annotations"],
+        label="Train",
     )
-
-    plt.title(
-        "SH17 Class Distribution"
+    plt.barh(
+        plot_data["class"],
+        plot_data["val_annotations"],
+        left=plot_data["train_annotations"],
+        label="Validation",
     )
-
-    plt.xlabel(
-        "Number of annotations"
-    )
-
+    plt.title("Class Distribution by Dataset Split")
+    plt.xlabel("Number of annotations")
     plt.ylabel("")
-
-    save_plot(
-        "class_distribution.png"
-    )
-
-    # ========================================================
-    # 2. TRAIN / VALIDATION DISTRIBUTION
-    # ========================================================
-
-    plot_df = df.sort_values(
-        "annotations",
-        ascending=True
-    )
-
-    plt.figure(figsize=(11, 7))
-
-    plt.barh(
-        plot_df["class"],
-        plot_df["train_annotations"],
-        label="Train"
-    )
-
-    plt.barh(
-        plot_df["class"],
-        plot_df["val_annotations"],
-        left=plot_df["train_annotations"],
-        label="Validation"
-    )
-
-    plt.title(
-        "Class Distribution by Dataset Split"
-    )
-
-    plt.xlabel(
-        "Number of annotations"
-    )
-
-    plt.ylabel("")
-
     plt.legend()
+    save_plot("train_val_distribution.png")
 
-    save_plot(
-        "train_val_distribution.png"
-    )
-
-    # ========================================================
-    # 3. BOUNDING BOX SIZE BY CLASS
-    # ========================================================
-
-    plot_df = df.sort_values(
-        "median_bbox_area_percent",
-        ascending=True
-    )
-
+    plot_data = statistics.sort_values("median_bbox_area_percent")
     plt.figure(figsize=(11, 7))
-
-    plt.barh(
-        plot_df["class"],
-        plot_df["median_bbox_area_percent"]
-    )
-
-    plt.title(
-        "Median Bounding Box Size by Class"
-    )
-
-    plt.xlabel(
-        "Median bounding box area (% of image)"
-    )
-
+    plt.barh(plot_data["class"], plot_data["median_bbox_area_percent"])
+    plt.title("Median Bounding Box Size by Class")
+    plt.xlabel("Median bounding box area (% of image)")
     plt.ylabel("")
-
-    save_plot(
-        "bbox_size_by_class.png"
-    )
-
-    # ========================================================
-    # 4. IMAGE RESOLUTION
-    # ========================================================
+    save_plot("bbox_size_by_class.png")
 
     plt.figure(figsize=(9, 6))
-
-    plt.scatter(
-        widths,
-        heights,
-        alpha=0.25
-    )
-
-    plt.title(
-        "SH17 Image Resolutions"
-    )
-
-    plt.xlabel(
-        "Image width (pixels)"
-    )
-
-    plt.ylabel(
-        "Image height (pixels)"
-    )
-
-    save_plot(
-        "image_resolutions.png"
-    )
-
-    # ========================================================
-    # 5. OBJECTS PER IMAGE
-    # ========================================================
+    plt.scatter(widths, heights, alpha=0.25)
+    plt.title("SH17 Image Resolutions")
+    plt.xlabel("Image width (pixels)")
+    plt.ylabel("Image height (pixels)")
+    save_plot("image_resolutions.png")
 
     plt.figure(figsize=(9, 6))
-
-    plt.hist(
-        objects_per_image,
-        bins=35
-    )
-
-    plt.title(
-        "Objects per Image"
-    )
-
-    plt.xlabel(
-        "Number of annotated objects"
-    )
-
-    plt.ylabel(
-        "Number of images"
-    )
-
-    save_plot(
-        "objects_per_image.png"
-    )
-
-    # ========================================================
-    # SUMMARY
-    # ========================================================
-
-    total_annotations = sum(
-        class_counts.values()
-    )
+    plt.hist(objects_per_image, bins=35)
+    plt.title("Objects per Image")
+    plt.xlabel("Number of annotated objects")
+    plt.ylabel("Number of images")
+    save_plot("objects_per_image.png")
 
     summary = f"""
 SH17 DATASET SUMMARY
@@ -429,7 +201,7 @@ Images:
     {len(image_files)}
 
 Annotations:
-    {total_annotations}
+    {sum(class_counts.values())}
 
 Classes:
     {len(CLASS_NAMES)}
@@ -452,25 +224,12 @@ Average objects per image:
 Median objects per image:
     {np.median(objects_per_image):.0f}
 """.strip()
-
-    (
-        OUTPUT_DIR /
-        "dataset_summary.txt"
-    ).write_text(
-        summary,
-        encoding="utf-8"
-    )
-
+    (OUTPUT_DIR / "dataset_summary.txt").write_text(summary, encoding="utf-8")
     print("\n" + summary)
-
     print("\n" + "=" * 60)
     print("INSPECTION COMPLETE")
     print("=" * 60)
-
-    print(
-        f"\nResults saved to:\n"
-        f"{OUTPUT_DIR.resolve()}"
-    )
+    print(f"\nResults saved to:\n{OUTPUT_DIR.resolve()}")
 
 
 if __name__ == "__main__":

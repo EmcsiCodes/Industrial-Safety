@@ -22,7 +22,7 @@ def main():
         val=False,
         plots=False,
 
-        project="results/training",
+        project="results/yolo",
         name="speed_test_b8_w4",
 
         seed=42,

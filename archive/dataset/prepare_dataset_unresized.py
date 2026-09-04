@@ -1,10 +1,9 @@
 from pathlib import Path
 from collections import Counter
+import os
 import shutil
 import csv
-
 import yaml
-from PIL import Image
 
 
 # ============================================================
@@ -20,28 +19,17 @@ TRAIN_FILE = RAW_ROOT / "train_files.txt"
 VAL_FILE = RAW_ROOT / "val_files.txt"
 
 
-# IMPORTANT:
-# New folder. Do NOT modify SH17_safety because those images
-# may be hard-linked to the raw dataset.
-OUTPUT_ROOT = Path(
-    "data/processed/SH17_safety_1920"
-)
+OUTPUT_ROOT = Path("data/processed/SH17_safety_unresized")
 
 OUTPUT_IMAGES = OUTPUT_ROOT / "images"
 OUTPUT_LABELS = OUTPUT_ROOT / "labels"
 
 
-# Maximum width OR height.
-# Images smaller than this are NOT upscaled.
-MAX_SIDE = 1920
-
-JPEG_QUALITY = 90
-
-
 # ============================================================
-# ORIGINAL SH17 CLASSES
+# SELECTED CLASSES
 # ============================================================
 
+# Original SH17 class IDs
 SH17_CLASSES = {
     0: "person",
     1: "ear",
@@ -63,19 +51,16 @@ SH17_CLASSES = {
 }
 
 
-# ============================================================
-# OUR SELECTED CLASSES
-# ============================================================
-
-# original SH17 ID -> new ID
+# Mapping:
+# original SH17 ID -> our new ID
 CLASS_MAPPING = {
-    0: 0,     # person
-    7: 1,     # tool
-    10: 2,    # helmet
-    16: 3,    # safety-vest
-    9: 4,     # gloves
-    8: 5,     # glasses
-    5: 6,     # face-mask
+    0: 0,    # person
+    7: 1,    # tool
+    10: 2,   # helmet
+    16: 3,   # safety-vest
+    9: 4,    # gloves
+    8: 5,    # glasses
+    5: 6,    # face-mask
 }
 
 
@@ -99,13 +84,19 @@ IMAGE_EXTENSIONS = {
 }
 
 
+# "hardlink" saves disk space.
+# If it fails, the script falls back to copying.
+IMAGE_MODE = "hardlink"
+
+
 # ============================================================
 # HELPERS
 # ============================================================
 
 def read_split_file(path):
     """
-    Read train_files.txt or val_files.txt and return image stems.
+    Read SH17 train_files.txt / val_files.txt
+    and return the image stems.
     """
 
     stems = set()
@@ -130,7 +121,11 @@ def read_split_file(path):
 
 def build_image_index():
     """
-    image stem -> original image path
+    Map:
+        image stem -> full image path
+
+    Example:
+        abc123 -> data/raw/SH17/images/abc123.jpg
     """
 
     index = {}
@@ -143,187 +138,105 @@ def build_image_index():
             in IMAGE_EXTENSIONS
         ):
 
-            if image_path.stem in index:
+            stem = image_path.stem
+
+            if stem in index:
 
                 raise RuntimeError(
-                    f"Duplicate image stem: "
-                    f"{image_path.stem}"
+                    f"Duplicate image stem found: {stem}\n"
+                    f"{index[stem]}\n"
+                    f"{image_path}"
                 )
 
-            index[
-                image_path.stem
-            ] = image_path
+            index[stem] = image_path
 
     return index
 
 
 def build_label_index():
     """
-    image stem -> original YOLO label path
+    Map:
+        image stem -> YOLO label path
     """
 
     index = {}
 
-    for label_path in RAW_LABELS.rglob(
-        "*.txt"
-    ):
+    for label_path in RAW_LABELS.rglob("*.txt"):
 
-        if label_path.stem in index:
+        stem = label_path.stem
+
+        if stem in index:
 
             raise RuntimeError(
-                f"Duplicate label stem: "
-                f"{label_path.stem}"
+                f"Duplicate label stem found: {stem}"
             )
 
-        index[
-            label_path.stem
-        ] = label_path
+        index[stem] = label_path
 
     return index
 
 
-# ============================================================
-# IMAGE RESIZING
-# ============================================================
-
-def resize_or_copy_image(
+def create_image_link_or_copy(
     source,
     destination
 ):
     """
-    Downscale the image if its largest dimension exceeds MAX_SIDE.
+    Prefer hard links to avoid duplicating
+    gigabytes of SH17 image data.
 
-    The aspect ratio is preserved.
-    Images are NEVER upscaled.
-
-    Returns:
-        resized: bool
-        original_size: (width, height)
-        output_size: (width, height)
+    If hard-link creation is unavailable,
+    fall back to a normal file copy.
     """
 
-    with Image.open(source) as image:
+    if destination.exists():
+        return "existing"
 
-        original_width, original_height = (
-            image.size
-        )
+    if IMAGE_MODE == "hardlink":
 
-        largest_side = max(
-            original_width,
-            original_height
-        )
+        try:
 
-        # ----------------------------------------------------
-        # Already small enough
-        # ----------------------------------------------------
+            os.link(
+                source,
+                destination
+            )
 
-        if largest_side <= MAX_SIDE:
+            return "hardlink"
+
+        except OSError:
 
             shutil.copy2(
                 source,
                 destination
             )
 
-            return (
-                False,
-                (original_width, original_height),
-                (original_width, original_height),
-            )
+            return "copy"
 
-        # ----------------------------------------------------
-        # Calculate new dimensions
-        # ----------------------------------------------------
+    shutil.copy2(
+        source,
+        destination
+    )
 
-        scale = (
-            MAX_SIDE / largest_side
-        )
+    return "copy"
 
-        new_width = round(
-            original_width * scale
-        )
-
-        new_height = round(
-            original_height * scale
-        )
-
-        # ----------------------------------------------------
-        # Resize
-        # ----------------------------------------------------
-
-        image = image.convert("RGB")
-
-        resized_image = image.resize(
-            (
-                new_width,
-                new_height
-            ),
-            Image.Resampling.LANCZOS
-        )
-
-        suffix = (
-            destination
-            .suffix
-            .lower()
-        )
-
-        # ----------------------------------------------------
-        # Save according to format
-        # ----------------------------------------------------
-
-        if suffix in {
-            ".jpg",
-            ".jpeg"
-        }:
-
-            resized_image.save(
-                destination,
-                quality=JPEG_QUALITY,
-                optimize=True
-            )
-
-        elif suffix == ".png":
-
-            resized_image.save(
-                destination,
-                optimize=True
-            )
-
-        elif suffix == ".webp":
-
-            resized_image.save(
-                destination,
-                quality=JPEG_QUALITY
-            )
-
-        else:
-            resized_image.save(
-                destination
-            )
-
-        return (
-            True,
-            (original_width, original_height),
-            (new_width, new_height),
-        )
-
-
-# ============================================================
-# LABEL FILTERING
-# ============================================================
 
 def filter_label_file(
     source_label,
     destination_label
 ):
     """
-    Keep only our 7 selected classes.
+    Keep only selected SH17 classes and
+    remap their IDs.
 
-    YOLO coordinates are normalized, so image resizing requires
-    NO changes to bounding-box coordinates.
+    Bounding-box coordinates remain unchanged.
+
+    Returns:
+        Counter containing output annotation
+        counts per NEW class ID.
     """
 
-    output_lines = []
     counts = Counter()
+
+    output_lines = []
 
     if source_label is not None:
 
@@ -342,15 +255,14 @@ def filter_label_file(
 
                 raise ValueError(
                     f"Invalid annotation in "
-                    f"{source_label}:\n"
-                    f"{line}"
+                    f"{source_label}:\n{line}"
                 )
 
             old_class_id = int(
                 parts[0]
             )
 
-            # Ignore unwanted SH17 classes
+            # Discard classes we do not want
             if old_class_id not in CLASS_MAPPING:
                 continue
 
@@ -360,7 +272,8 @@ def filter_label_file(
                 ]
             )
 
-            output_line = " ".join([
+            # Keep the original YOLO coordinates
+            new_line = " ".join([
                 str(new_class_id),
                 parts[1],
                 parts[2],
@@ -369,12 +282,15 @@ def filter_label_file(
             ])
 
             output_lines.append(
-                output_line
+                new_line
             )
 
             counts[
                 new_class_id
             ] += 1
+
+    # Empty label files are intentional:
+    # they represent negative/background images.
 
     destination_label.write_text(
         "\n".join(output_lines)
@@ -390,17 +306,19 @@ def filter_label_file(
 
 
 # ============================================================
-# DIRECTORY SETUP
+# CREATE OUTPUT STRUCTURE
 # ============================================================
 
-def create_directories():
+def prepare_directories():
 
-    for directory in [
+    directories = [
         OUTPUT_IMAGES / "train",
         OUTPUT_IMAGES / "val",
         OUTPUT_LABELS / "train",
         OUTPUT_LABELS / "val",
-    ]:
+    ]
+
+    for directory in directories:
 
         directory.mkdir(
             parents=True,
@@ -409,7 +327,7 @@ def create_directories():
 
 
 # ============================================================
-# PROCESS SPLIT
+# PROCESS ONE SPLIT
 # ============================================================
 
 def process_split(
@@ -419,29 +337,29 @@ def process_split(
     label_index
 ):
 
-    image_dir = (
+    image_output_dir = (
         OUTPUT_IMAGES /
         split_name
     )
 
-    label_dir = (
+    label_output_dir = (
         OUTPUT_LABELS /
         split_name
     )
 
+
     class_counts = Counter()
 
-    resized_count = 0
-    unchanged_count = 0
-    negative_count = 0
+    images_processed = 0
+    negative_images = 0
 
-    original_pixels = 0
-    output_pixels = 0
+    hardlinks_created = 0
+    files_copied = 0
+    existing_images = 0
 
 
     print(
-        f"\nProcessing "
-        f"{split_name}..."
+        f"\nProcessing {split_name} split..."
     )
 
 
@@ -450,6 +368,10 @@ def process_split(
         start=1
     ):
 
+        # ----------------------------------------------------
+        # IMAGE
+        # ----------------------------------------------------
+
         source_image = (
             image_index.get(stem)
         )
@@ -457,60 +379,44 @@ def process_split(
         if source_image is None:
 
             raise FileNotFoundError(
-                f"Image missing for "
+                f"No image found for split entry: "
                 f"{stem}"
             )
 
 
         destination_image = (
-            image_dir /
+            image_output_dir /
             source_image.name
         )
 
 
-        # ----------------------------------------------------
-        # Resize / copy image
-        # ----------------------------------------------------
-
-        (
-            resized,
-            original_size,
-            output_size
-        ) = resize_or_copy_image(
+        method = create_image_link_or_copy(
             source_image,
             destination_image
         )
 
 
-        if resized:
-            resized_count += 1
+        if method == "hardlink":
+            hardlinks_created += 1
+
+        elif method == "copy":
+            files_copied += 1
+
         else:
-            unchanged_count += 1
-
-
-        original_pixels += (
-            original_size[0]
-            *
-            original_size[1]
-        )
-
-        output_pixels += (
-            output_size[0]
-            *
-            output_size[1]
-        )
+            existing_images += 1
 
 
         # ----------------------------------------------------
-        # Process label
+        # LABEL
         # ----------------------------------------------------
 
         source_label = (
             label_index.get(stem)
         )
 
+
         destination_label = (
-            label_dir /
+            label_output_dir /
             f"{stem}.txt"
         )
 
@@ -526,64 +432,54 @@ def process_split(
         )
 
 
-        if sum(
-            counts.values()
-        ) == 0:
+        if sum(counts.values()) == 0:
+            negative_images += 1
 
-            negative_count += 1
+
+        images_processed += 1
 
 
         # ----------------------------------------------------
-        # Progress
+        # PROGRESS
         # ----------------------------------------------------
 
         if (
-            number % 250 == 0
+            number % 500 == 0
             or number == len(stems)
         ):
 
             print(
-                f"  {number:4d} / "
-                f"{len(stems)}"
+                f"  {number}/{len(stems)} images"
             )
 
 
     return {
-        "images": len(stems),
-
-        "resized": resized_count,
-        "unchanged": unchanged_count,
-        "negative": negative_count,
+        "images": images_processed,
+        "negative_images": negative_images,
 
         "class_counts": class_counts,
 
-        "original_pixels":
-            original_pixels,
-
-        "output_pixels":
-            output_pixels,
+        "hardlinks": hardlinks_created,
+        "copies": files_copied,
+        "existing": existing_images,
     }
 
 
 # ============================================================
-# YAML
+# CREATE YAML
 # ============================================================
 
 def create_yaml():
 
-    data = {
+    yaml_data = {
         "path": str(
             OUTPUT_ROOT.resolve()
         ),
 
-        "train":
-            "images/train",
+        "train": "images/train",
+        "val": "images/val",
 
-        "val":
-            "images/val",
-
-        "names":
-            NEW_CLASS_NAMES,
+        "names": NEW_CLASS_NAMES,
     }
 
 
@@ -599,7 +495,7 @@ def create_yaml():
     ) as file:
 
         yaml.safe_dump(
-            data,
+            yaml_data,
             file,
             sort_keys=False
         )
@@ -609,15 +505,16 @@ def create_yaml():
 
 
 # ============================================================
-# CLASS MAPPING
+# SAVE CLASS MAPPING
 # ============================================================
 
-def create_class_mapping_csv():
+def save_class_mapping():
 
     output_path = (
         OUTPUT_ROOT /
         "class_mapping.csv"
     )
+
 
     with output_path.open(
         "w",
@@ -636,42 +533,38 @@ def create_class_mapping_csv():
             "new_name",
         ])
 
-        for (
-            old_id,
-            new_id
-        ) in CLASS_MAPPING.items():
+
+        for old_id, new_id in (
+            CLASS_MAPPING.items()
+        ):
 
             writer.writerow([
                 old_id,
                 SH17_CLASSES[old_id],
 
                 new_id,
-                NEW_CLASS_NAMES[
-                    new_id
-                ],
+                NEW_CLASS_NAMES[new_id],
             ])
 
 
 # ============================================================
-# VERIFY
+# VERIFY OUTPUT
 # ============================================================
 
-def verify_dataset(
+def verify_processed_dataset(
     train_stems,
     val_stems
 ):
 
     print(
-        "\nVerifying output..."
+        "\nVerifying processed dataset..."
     )
+
 
     errors = []
 
 
-    for (
-        split_name,
-        stems
-    ) in [
+    for split_name, stems in [
         ("train", train_stems),
         ("val", val_stems),
     ]:
@@ -687,47 +580,43 @@ def verify_dataset(
         )
 
 
-        images = [
-            p
-            for p in image_dir.iterdir()
-            if p.suffix.lower()
+        output_images = [
+            path
+            for path in image_dir.iterdir()
+            if path.suffix.lower()
             in IMAGE_EXTENSIONS
         ]
 
-        labels = list(
-            label_dir.glob(
-                "*.txt"
-            )
+
+        output_labels = list(
+            label_dir.glob("*.txt")
         )
 
 
-        if len(images) != len(stems):
+        if len(output_images) != len(stems):
 
             errors.append(
-                f"{split_name}: "
-                f"expected {len(stems)} images, "
-                f"found {len(images)}"
+                f"{split_name}: expected "
+                f"{len(stems)} images but found "
+                f"{len(output_images)}"
             )
 
 
-        if len(labels) != len(stems):
+        if len(output_labels) != len(stems):
 
             errors.append(
-                f"{split_name}: "
-                f"expected {len(stems)} labels, "
-                f"found {len(labels)}"
+                f"{split_name}: expected "
+                f"{len(stems)} labels but found "
+                f"{len(output_labels)}"
             )
 
 
-        for label_path in labels:
+        # Check class IDs
+        for label_path in output_labels:
 
-            for line in (
-                label_path
-                .read_text(
-                    encoding="utf-8"
-                )
-                .splitlines()
-            ):
+            for line in label_path.read_text(
+                encoding="utf-8"
+            ).splitlines():
 
                 if not line.strip():
                     continue
@@ -741,7 +630,7 @@ def verify_dataset(
                 ):
 
                     errors.append(
-                        f"Bad class ID "
+                        f"Invalid class ID "
                         f"{class_id} in "
                         f"{label_path}"
                     )
@@ -750,7 +639,7 @@ def verify_dataset(
     if errors:
 
         print(
-            "\nVerification FAILED:"
+            "\nVERIFICATION FAILED:"
         )
 
         for error in errors:
@@ -759,7 +648,7 @@ def verify_dataset(
             )
 
         raise RuntimeError(
-            "Dataset verification failed."
+            "Processed dataset verification failed."
         )
 
 
@@ -772,7 +661,7 @@ def verify_dataset(
 # SUMMARY
 # ============================================================
 
-def create_summary(
+def print_and_save_summary(
     train_results,
     val_results
 ):
@@ -790,68 +679,47 @@ def create_summary(
     )
 
 
-    original_pixels = (
-        train_results[
-            "original_pixels"
-        ]
-        +
-        val_results[
-            "original_pixels"
-        ]
-    )
-
-    output_pixels = (
-        train_results[
-            "output_pixels"
-        ]
-        +
-        val_results[
-            "output_pixels"
-        ]
-    )
-
-
-    pixel_reduction = (
-        1
-        -
-        output_pixels
-        / original_pixels
-    ) * 100
-
-
     lines = [
-        "SH17 SAFETY DATASET - RESIZED",
-        "=" * 55,
+        "SH17 SAFETY DATASET",
+        "=" * 50,
         "",
-        f"Maximum image side: {MAX_SIDE} px",
-        f"JPEG quality:       {JPEG_QUALITY}",
+        "Selected classes:",
+    ]
+
+
+    for class_id, class_name in (
+        NEW_CLASS_NAMES.items()
+    ):
+
+        lines.append(
+            f"  {class_id}: {class_name}"
+        )
+
+
+    lines.extend([
         "",
         "Dataset split:",
-        f"  Train:       {train_results['images']}",
-        f"  Validation:  {val_results['images']}",
-        "",
-        "Image resizing:",
         (
-            f"  Resized:     "
-            f"{train_results['resized'] + val_results['resized']}"
+            f"  Train images: "
+            f"{train_results['images']}"
         ),
         (
-            f"  Unchanged:   "
-            f"{train_results['unchanged'] + val_results['unchanged']}"
+            f"  Validation images: "
+            f"{val_results['images']}"
         ),
         (
-            f"  Pixel reduction: "
-            f"{pixel_reduction:.1f}%"
+            f"  Total images: "
+            f"{train_results['images'] + val_results['images']}"
         ),
         "",
         "Negative/background images:",
         (
-            f"  Train:       "
-            f"{train_results['negative']}"
+            f"  Train: "
+            f"{train_results['negative_images']}"
         ),
         (
-            f"  Validation:  "
-            f"{val_results['negative']}"
+            f"  Validation: "
+            f"{val_results['negative_images']}"
         ),
         "",
         "Annotations:",
@@ -863,32 +731,64 @@ def create_summary(
             f"{'Total':>10}"
         ),
         "-" * 45,
-    ]
+    ])
 
 
-    for (
-        class_id,
-        class_name
-    ) in NEW_CLASS_NAMES.items():
+    for class_id, class_name in (
+        NEW_CLASS_NAMES.items()
+    ):
 
         train_count = (
-            train_counts[
-                class_id
-            ]
+            train_counts[class_id]
         )
 
         val_count = (
-            val_counts[
-                class_id
-            ]
+            val_counts[class_id]
         )
+
+        total = (
+            train_count
+            +
+            val_count
+        )
+
 
         lines.append(
             f"{class_name:15}"
             f"{train_count:>10}"
             f"{val_count:>10}"
-            f"{train_count + val_count:>10}"
+            f"{total:>10}"
         )
+
+
+    total_train_annotations = sum(
+        train_counts.values()
+    )
+
+    total_val_annotations = sum(
+        val_counts.values()
+    )
+
+
+    lines.extend([
+        "-" * 45,
+        (
+            f"{'TOTAL':15}"
+            f"{total_train_annotations:>10}"
+            f"{total_val_annotations:>10}"
+            f"{total_train_annotations + total_val_annotations:>10}"
+        ),
+        "",
+        "Image storage:",
+        (
+            f"  Hard links created: "
+            f"{train_results['hardlinks'] + val_results['hardlinks']}"
+        ),
+        (
+            f"  Images copied: "
+            f"{train_results['copies'] + val_results['copies']}"
+        ),
+    ])
 
 
     summary = "\n".join(
@@ -917,22 +817,13 @@ def create_summary(
 def main():
 
     print("=" * 60)
-    print("PREPARING RESIZED SH17 SAFETY DATASET")
+    print("PREPARING SH17 SAFETY DATASET")
     print("=" * 60)
 
 
-    # Safety check:
-    # don't accidentally overwrite an existing prepared dataset.
-
-    if OUTPUT_ROOT.exists():
-
-        raise RuntimeError(
-            f"\nOutput folder already exists:\n"
-            f"{OUTPUT_ROOT}\n\n"
-            f"Delete it manually if you want "
-            f"to regenerate the dataset."
-        )
-
+    # --------------------------------------------------------
+    # Read official split
+    # --------------------------------------------------------
 
     train_stems = read_split_file(
         TRAIN_FILE
@@ -943,21 +834,8 @@ def main():
     )
 
 
-    overlap = (
-        train_stems &
-        val_stems
-    )
-
-    if overlap:
-
-        raise RuntimeError(
-            f"{len(overlap)} images are "
-            f"in both train and val."
-        )
-
-
     print(
-        f"\nTrain images: "
+        f"\nTrain images:      "
         f"{len(train_stems)}"
     )
 
@@ -967,8 +845,25 @@ def main():
     )
 
 
+    # Safety check:
+    # no image should be in both splits.
+
+    overlap = (
+        train_stems &
+        val_stems
+    )
+
+
+    if overlap:
+
+        raise RuntimeError(
+            f"{len(overlap)} images appear "
+            f"in BOTH train and validation."
+        )
+
+
     # --------------------------------------------------------
-    # Index
+    # Index raw files
     # --------------------------------------------------------
 
     print(
@@ -979,32 +874,38 @@ def main():
         build_image_index()
     )
 
+
     print(
-        f"Images found: "
+        f"Images indexed: "
         f"{len(image_index)}"
     )
 
 
     print(
-        "Indexing labels..."
+        "Indexing raw labels..."
     )
 
     label_index = (
         build_label_index()
     )
 
+
     print(
-        f"Labels found: "
+        f"Labels indexed: "
         f"{len(label_index)}"
     )
 
 
     # --------------------------------------------------------
-    # Prepare
+    # Create directories
     # --------------------------------------------------------
 
-    create_directories()
+    prepare_directories()
 
+
+    # --------------------------------------------------------
+    # Process splits
+    # --------------------------------------------------------
 
     train_results = process_split(
         "train",
@@ -1028,20 +929,24 @@ def main():
 
     yaml_path = create_yaml()
 
-    create_class_mapping_csv()
+    save_class_mapping()
 
 
     # --------------------------------------------------------
     # Verify
     # --------------------------------------------------------
 
-    verify_dataset(
+    verify_processed_dataset(
         train_stems,
         val_stems
     )
 
 
-    create_summary(
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
+    print_and_save_summary(
         train_results,
         val_results
     )
@@ -1052,19 +957,20 @@ def main():
     )
 
     print(
-        "RESIZED DATASET READY"
+        "DATASET PREPARATION COMPLETE"
     )
 
     print("=" * 60)
 
 
     print(
-        f"\nDataset:\n"
+        f"\nProcessed dataset:\n"
         f"{OUTPUT_ROOT.resolve()}"
     )
 
+
     print(
-        f"\nYOLO YAML:\n"
+        f"\nYOLO configuration:\n"
         f"{yaml_path.resolve()}"
     )
 

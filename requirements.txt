@@ -9,8 +9,6 @@
 #   python -m pip install -r requirements.txt
 
 ultralytics==8.4.137
-opencv-python==5.0.0.93
-streamlit==1.62.0
 matplotlib==3.11.1
 pandas==3.0.5
 numpy==2.4.6
