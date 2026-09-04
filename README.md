@@ -11,7 +11,9 @@ The seven selected classes are `person`, `tool`, `helmet`, `safety-vest`,
 
 ```text
 src/
+  app/           Minimal Streamlit video demo
   dataset/       Dataset inspection, preparation, and annotation visualization
+  inference/     Reusable external-video inference backend
   yolo/          YOLO11n training and result analysis
   scratch/       Custom dataset, model, training, evaluation, and visualization
   visualization/ Presentation-ready training and model-comparison figures
@@ -94,3 +96,27 @@ All new figures, tables, and summaries are written under
 `results/final_figures/`. The mAP values are the primary direct comparison;
 reported precision and recall may use different operating points in the YOLO
 and custom evaluators.
+
+## Video detection demo
+
+Process an external video from the command line:
+
+```powershell
+python src/inference/video.py --input data/external/videos/test.mp4 --output results/external_tests/test_annotated.mp4 --conf 0.30 --interval 5
+```
+
+Launch the minimal web interface with:
+
+```powershell
+streamlit run src/app/app.py
+```
+
+Both interfaces use `results/yolo/baseline/weights/best.pt`. YOLO inference is
+performed every N frames. The most recent detections are reused on intermediate
+frames to reduce processing cost. External source videos belong under
+`data/external/videos/`, and generated videos belong under
+`results/external_tests/`.
+
+The demo prefers browser-compatible H.264 encoding. On systems where OpenCV
+cannot provide H.264, it falls back to `mp4v`; that fallback may require using
+the download button and a desktop video player.
